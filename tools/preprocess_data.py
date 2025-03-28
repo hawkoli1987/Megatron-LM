@@ -14,6 +14,14 @@ import glob
 import torch
 import numpy as np
 import multiprocessing
+
+# Force 'spawn' method for all multiprocessing
+try:
+    multiprocessing.set_start_method('spawn')
+    print(f"{time.strftime('%H:%M:%S', time.localtime())} Process - Using 'spawn' multiprocessing start method")
+except RuntimeError:
+    print(f"{time.strftime('%H:%M:%S', time.localtime())} Process - Multiprocessing start method already set to: {multiprocessing.get_start_method()}")
+
 import functools
 try:
     import nltk
