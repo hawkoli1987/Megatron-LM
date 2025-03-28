@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 import nltk
 import pytest
@@ -30,25 +31,48 @@ __LOCAL_GPT2_MERGE = "/home/gitlab-runner/data/gpt3_data/gpt2-merges.txt"
 __LOCAL_GPT2_VOCAB = "/home/gitlab-runner/data/gpt3_data/gpt2-vocab.json"
 
 
-def dummy_jsonl(odir):
-    # numbers
-    list_numbers = [json.dumps({"text": str(i + 1)}) + "\n" for i in range(100)]
-    with open(os.path.join(odir, "numbers.jsonl"), "w") as writer:
-        writer.writelines(list_numbers)
-    # numbers ascending
-    list_numbers_ascending = [
-        json.dumps({"text": " ".join([str(j + 1) for j in range(i + 1)])}) + "\n"
-        for i in range(100)
-    ]
-    with open(os.path.join(odir, "numbers_ascending.jsonl"), "w") as writer:
-        writer.writelines(list_numbers_ascending)
-    # test
-    list_test = []
-    with open(__file__) as reader:
-        for line in reader:
-            list_test.append(json.dumps({"text": line}) + "\n")
-    with open(os.path.join(odir, "test.jsonl"), "w") as writer:
-        writer.writelines(list_test)
+# def dummy_jsonl(odir):
+#     # numbers
+#     list_numbers = [json.dumps({"text": str(i + 1)}) + "\n" for i in range(100)]
+#     with open(os.path.join(odir, "numbers.jsonl"), "w") as writer:
+#         writer.writelines(list_numbers)
+#     # numbers ascending
+#     list_numbers_ascending = [
+#         json.dumps({"text": " ".join([str(j + 1) for j in range(i + 1)])}) + "\n"
+#         for i in range(100)
+#     ]
+#     with open(os.path.join(odir, "numbers_ascending.jsonl"), "w") as writer:
+#         writer.writelines(list_numbers_ascending)
+#     # test
+#     list_test = []
+#     with open(__file__) as reader:
+#         for line in reader:
+#             list_test.append(json.dumps({"text": line}) + "\n")
+#     with open(os.path.join(odir, "test.jsonl"), "w") as writer:
+#         writer.writelines(list_test)
+
+NUM_SAMPLES = 1000000
+SEQ_LEN = 8192
+
+def dummy_long_jsonl(odir):
+    """
+    Creates a jsonl file with NUM_SAMPLES rows, each row containing a sequence of '1' characters
+    with length SEQ_LEN.
+    
+    Args:
+        odir: Output directory where the jsonl file will be saved
+        seq_len: Length of the sequence of '1' characters in each row
+    """
+    # Create a sequence of '1' characters with length SEQ_LEN
+    sequence = '1' * SEQ_LEN
+    
+    # Generate NUM_SAMPLES rows, each containing the sequence
+    list_sequences = [json.dumps({"text": sequence}) + "\n" for _ in range(NUM_SAMPLES)]
+    
+    # Write the rows to a jsonl file
+    with open(os.path.join(odir, "sequences.jsonl"), "w") as writer:
+        writer.writelines(list_sequences)
+
 
 
 def build_datasets(idir, odir, extra_args=[]):
@@ -79,13 +103,23 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
     os.mkdir(path_to_data)
 
     # create the dummy resources
-    dummy_jsonl(path_to_raws)
+    start_time = time.time()
+    # dummy_jsonl(path_to_raws)
+    dummy_long_jsonl(path_to_raws)
+    create_time = time.time() - start_time
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset creation completed in {create_time:.2f} seconds")
 
     # build the datasets
+    start_time = time.time()
     build_datasets(path_to_raws, path_to_data, extra_args=extra_args)
+    build_time = time.time() - start_time
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset building completed in {build_time:.2f} seconds")
 
     # merge the datasets
+    start_time = time.time()
     merge_datasets(path_to_data)
+    merge_time = time.time() - start_time
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset merging completed in {merge_time:.2f} seconds")
 
     sys.argv = [sys.argv[0], "--input", None, "--output-prefix", None] + extra_args
     encoder = Encoder(build_args())
@@ -184,6 +218,9 @@ def gpt2_merge(odir):
 
 
 def test_preprocess_data_gpt():
+    test_start = time.time()
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Started")
+    
     with tempfile.TemporaryDirectory() as temp_dir:
 
         # gpt specific args
@@ -198,10 +235,13 @@ def test_preprocess_data_gpt():
             "--workers",
             "10",
             "--log-interval",
-            "1",
+            "1", 
         ]
 
         do_test_preprocess_data(temp_dir, extra_args=gpt_args)
+    
+    test_end = time.time()
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Total test execution took {test_end - test_start:.2f} seconds")
 
 
 def bert_vocab(odir):

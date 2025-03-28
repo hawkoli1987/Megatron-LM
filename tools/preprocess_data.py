@@ -14,6 +14,7 @@ import glob
 import torch
 import numpy as np
 import multiprocessing
+import functools
 try:
     import nltk
     from nltk.tokenize.punkt import PunktLanguageVars
@@ -26,6 +27,17 @@ from megatron.training.tokenizer import build_tokenizer
 from megatron.training.arguments import _add_tokenizer_args
 from megatron.core.datasets import indexed_dataset
 
+
+def timing_decorator(func):
+    """Decorator to measure and print the execution time of a function."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        result = func(*args, **kwargs)
+        elapsed = time.time() - start_time
+        print(f"{time.strftime('%H:%M:%S', time.localtime())} Process - {func.__name__} took {elapsed:.2f} seconds")
+        return result
+    return wrapper
 
 # https://stackoverflow.com/questions/33139531/preserve-empty-lines-with-nltks-punkt-tokenizer
 class CustomLanguageVars(PunktLanguageVars):
@@ -110,6 +122,7 @@ class Encoder(object):
 
 
 class Partition(object):
+    @timing_decorator
     def __init__(self, args, workers):
         self.args = args
         self.workers = workers
@@ -123,6 +136,7 @@ class Partition(object):
                   f"({count/elapsed} docs/s, {mbs} MB/s).",
                   file=sys.stderr)
 
+    @timing_decorator
     def split_sentences(self, file_name):
         input_file_name, output_file_name = file_name
         print("Opening", input_file_name)
@@ -143,11 +157,14 @@ class Partition(object):
         fin.close()
         fout.close()
 
-
     def process_json_file(self, file_name):
         input_file_name, output_prefix = file_name
         print("Opening", input_file_name)
+        
+        file_open_start = time.time()
         fin = open(input_file_name, 'r', encoding='utf-8')
+        file_open_end = time.time()
+        print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Opening file took {file_open_end - file_open_start:.2f} seconds")
 
         startup_start = time.time()
         encoder = Encoder(self.args)
@@ -176,15 +193,23 @@ class Partition(object):
         startup_end = time.time()
         proc_start = time.time()
         total_bytes_processed = 0
-        print("Time to startup:", startup_end - startup_start)
+        print(f"{time.strftime('%H:%M:%S', time.localtime())}  IN - startup took: {startup_end - startup_start:.2f} seconds")
+        encode_start = time.time()
         for i, (doc, sentence_lens, bytes_processed) in enumerate(encoded_docs, start=1):
             total_bytes_processed += bytes_processed
             for key in doc.keys():
                 builders[key].add_document(doc[key], sentence_lens[key])
-            self.print_processing_stats(i, proc_start, total_bytes_processed)
+            self.print_processing_stats(i, proc_start, total_bytes_processed)            
 
         fin.close()
-        builders[key].finalize(output_idx_files[key])
+        encode_end = time.time()
+        print(f"{time.strftime('%H:%M:%S', time.localtime())}  IN - Encoding partitions took {encode_end - encode_start:.2f} seconds")
+
+        finalize_start = time.time()
+        for key in builders:
+            builders[key].finalize(output_idx_files[key])
+        finalize_end = time.time()
+        print(f"{time.strftime('%H:%M:%S', time.localtime())}  IN - Finalizing builders took {finalize_end - finalize_start:.2f} seconds")
 
 
 def get_args():
@@ -246,6 +271,7 @@ def get_file_name(args, file_id):
     return file_names
 
 
+@timing_decorator
 def check_files_exist(in_ss_out_names, key, num_partitions):
     for i in range(num_partitions):
         if not os.path.exists(in_ss_out_names[i][key]):
@@ -264,6 +290,10 @@ def main():
                 "nltk library required for sentence splitting is not available.")
 
     in_ss_out_names = []
+
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Sentence splitting is {'enabled' if args.split_sentences else 'disabled'}")
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Number of partitions: {args.partitions}")
+
     if args.partitions == 1:
         file_name, extension = os.path.splitext(args.input)
         sentence_split_file = file_name + "_ss" + extension
@@ -351,14 +381,20 @@ def main():
     # encode partition files in parallel
     processes = []
     input_key = 'sentence_split' if args.split_sentences else 'partition'
+    
+    process_json_start = time.time()
     for name in in_ss_out_names:
         p = multiprocessing.Process(target=partition.process_json_file,
                                     args=((name[input_key], name['output_prefix']),))
         p.start()
         processes.append(p)
 
+    add_process_end = time.time()
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Adding {len(processes)} processes took {add_process_end - process_json_start:.2f} seconds")  
     for p in processes:
         p.join()
+    process_json_end = time.time()
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Process json took {process_json_end - process_json_start:.2f} seconds")
 
     if args.partitions == 1:
         return
@@ -371,8 +407,12 @@ def main():
     output_bin_files = {}
     output_idx_files = {}
     builders = {}
+    tokenizer_start = time.time()
     tokenizer = build_tokenizer(args)
+    tokenizer_end = time.time()
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Building tokenizer took {tokenizer_end - tokenizer_start:.2f} seconds")
 
+    merge_start = time.time()
     for key in args.json_keys:
         output_bin_files[key] = "{}_{}_{}.bin".format(args.output_prefix,
                                                       key, level)
@@ -389,6 +429,8 @@ def main():
                                                              key, level)
             builders[key].add_index(full_partition_output_prefix)
         builders[key].finalize(output_idx_files[key])
+    merge_end = time.time()
+    print(f"{time.strftime('%H:%M:%S', time.localtime())} Process - Merging partitions took {merge_end - merge_start:.2f} seconds")
 
 
 if __name__ == '__main__':
