@@ -269,30 +269,6 @@ def bert_vocab(odir):
     return path
 
 
-# @pytest.mark.flaky
-# @pytest.mark.flaky_in_dev
-# def test_preprocess_data_bert():
-#     with tempfile.TemporaryDirectory() as temp_dir:
-
-#         # bert specific args
-#         bert_args = [
-#             "--tokenizer-type",
-#             "BertWordPieceLowerCase",
-#             "--vocab-file",
-#             bert_vocab(temp_dir),
-#             "--split-sentences",
-#             "--workers",
-#             "10",
-#             "--log-interval",
-#             "1",
-#             "--partitions",
-#             "2",
-#             "--keep-sequential-samples",
-#         ]
-
-#         do_test_preprocess_data(temp_dir, extra_args=bert_args)
-
-
 if __name__ == "__main__":
     test_preprocess_data_gpt()
     # test_preprocess_data_bert()
