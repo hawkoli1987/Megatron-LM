@@ -31,28 +31,30 @@ __LOCAL_GPT2_MERGE = "/home/gitlab-runner/data/gpt3_data/gpt2-merges.txt"
 __LOCAL_GPT2_VOCAB = "/home/gitlab-runner/data/gpt3_data/gpt2-vocab.json"
 
 
-# def dummy_jsonl(odir):
-#     # numbers
-#     list_numbers = [json.dumps({"text": str(i + 1)}) + "\n" for i in range(100)]
-#     with open(os.path.join(odir, "numbers.jsonl"), "w") as writer:
-#         writer.writelines(list_numbers)
-#     # numbers ascending
-#     list_numbers_ascending = [
-#         json.dumps({"text": " ".join([str(j + 1) for j in range(i + 1)])}) + "\n"
-#         for i in range(100)
-#     ]
-#     with open(os.path.join(odir, "numbers_ascending.jsonl"), "w") as writer:
-#         writer.writelines(list_numbers_ascending)
-#     # test
-#     list_test = []
-#     with open(__file__) as reader:
-#         for line in reader:
-#             list_test.append(json.dumps({"text": line}) + "\n")
-#     with open(os.path.join(odir, "test.jsonl"), "w") as writer:
-#         writer.writelines(list_test)
+def dummy_jsonl(odir):
+    # numbers
+    list_numbers = [json.dumps({"text": str(i + 1)}) + "\n" for i in range(100)]
+    with open(os.path.join(odir, "numbers.jsonl"), "w") as writer:
+        writer.writelines(list_numbers)
+    # numbers ascending
+    list_numbers_ascending = [
+        json.dumps({"text": " ".join([str(j + 1) for j in range(i + 1)])}) + "\n"
+        for i in range(100)
+    ]
+    with open(os.path.join(odir, "numbers_ascending.jsonl"), "w") as writer:
+        writer.writelines(list_numbers_ascending)
+    # test
+    list_test = []
+    with open(__file__) as reader:
+        for line in reader:
+            list_test.append(json.dumps({"text": line}) + "\n")
+    with open(os.path.join(odir, "test.jsonl"), "w") as writer:
+        writer.writelines(list_test)
 
-NUM_SAMPLES = 1000000
+NUM_SAMPLES = 1000
 SEQ_LEN = 8192
+print(f"NUM_SAMPLES: {NUM_SAMPLES}")
+print(f"SEQ_LEN: {SEQ_LEN}")
 
 def dummy_long_jsonl(odir):
     """
@@ -104,7 +106,7 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
 
     # create the dummy resources
     start_time = time.time()
-    # dummy_jsonl(path_to_raws)
+    dummy_jsonl(path_to_raws)
     dummy_long_jsonl(path_to_raws)
     create_time = time.time() - start_time
     print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset creation completed in {create_time:.2f} seconds")
@@ -114,6 +116,26 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
     build_datasets(path_to_raws, path_to_data, extra_args=extra_args)
     build_time = time.time() - start_time
     print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset building completed in {build_time:.2f} seconds")
+
+    # Print directory contents
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Contents of {path_to_raws}:")
+    for file_name in os.listdir(path_to_raws):
+        file_path = os.path.join(path_to_raws, file_name)
+        if os.path.isfile(file_path):
+            file_size = os.path.getsize(file_path)
+            print(f"  {file_name}: {file_size/1024/1024:.2f} MB")
+        else:
+            print(f"  {file_name}: directory")
+
+    # Print directory contents
+    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Contents of {path_to_data}:")
+    for file_name in os.listdir(path_to_data):
+        file_path = os.path.join(path_to_data, file_name)
+        if os.path.isfile(file_path):
+            file_size = os.path.getsize(file_path)
+            print(f"  {file_name}: {file_size/1024/1024:.2f} MB")
+        else:
+            print(f"  {file_name}: directory")
 
     # merge the datasets
     start_time = time.time()
@@ -149,7 +171,10 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
     merged_doc_index_index = 0
 
     for basename in basenames:
+        print(f"path_to_raws: {path_to_raws}")
+        print(f"basename: {basename}")
         realpath_raw = f"{os.path.join(path_to_raws, '_'.join(basename.split('_')[:-2]))}.jsonl"
+        print(f"realpath_raw: {realpath_raw}")
         realpath_doc = os.path.join(path_to_data, basename.split(".")[-2])
 
         dataset_index = 0
