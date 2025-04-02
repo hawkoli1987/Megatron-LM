@@ -72,6 +72,7 @@ class Encoder(object):
     def initializer(self):
         # Use Encoder class as a container for global data
         Encoder.tokenizer = build_tokenizer(self.args)
+        print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Tokenizer initilized")
         if self.args.split_sentences:
             if not nltk_available:
                 print("NLTK is not available to split sentences.")
@@ -105,6 +106,10 @@ class Encoder(object):
         return json.dumps(output), len(json_line)
 
     def encode(self, json_line):
+        # Start timing
+        # tokenize_start = time.time()
+        
+        # Original encoding logic
         data = json.loads(json_line)
         ids = {}
         lens = {}
@@ -126,6 +131,11 @@ class Encoder(object):
                 sentence_lens[-1] += 1
             ids[key] = doc_ids
             lens[key] = sentence_lens
+                
+            # tokenize_time = time.time() - tokenize_start
+            # print(f"Tokenization took {tokenize_time*1e9:.4f} ns")
+        
+        # Return timing info along with results
         return ids, lens, len(json_line)
 
 
@@ -140,9 +150,9 @@ class Partition(object):
             current = time.time()
             elapsed = current - proc_start
             mbs = total_bytes_processed/elapsed/1024/1024
-            print(f"Processed {count} documents",
-                  f"({count/elapsed} docs/s, {mbs} MB/s).",
-                  file=sys.stderr)
+            # print(f"Processed {count} documents",
+            #       f"({count/elapsed} docs/s, {mbs} MB/s).",
+            #       file=sys.stderr)
 
     @timing_decorator
     def split_sentences(self, file_name):
@@ -203,11 +213,31 @@ class Partition(object):
         total_bytes_processed = 0
         print(f"{time.strftime('%H:%M:%S', time.localtime())}  IN - startup took: {startup_end - startup_start:.2f} seconds")
         encode_start = time.time()
+
+        # Add this before your processing loop
+        last_read_time = time.time()
+
         for i, (doc, sentence_lens, bytes_processed) in enumerate(encoded_docs, start=1):
+                       
+            # Log read time periodically
+            # Break after processing 10 documents
+            if i % 100 == 0:
+                read_time = time.time() - last_read_time
+                print(f"In time of chunk: {read_time*1e9:.4f} ns")
+            
             total_bytes_processed += bytes_processed
+            # Time the builder operations
+            builder_start = time.time()
             for key in doc.keys():
                 builders[key].add_document(doc[key], sentence_lens[key])
-            self.print_processing_stats(i, proc_start, total_bytes_processed)            
+            
+            # Log builder time periodically
+            if i % 100 == 0:
+                builder_time = time.time() - builder_start
+                print(f"Out time of chunk: {builder_time*1e9:.4f} ns")
+            
+            self.print_processing_stats(i, proc_start, total_bytes_processed)   
+            last_read_time = time.time()        
 
         fin.close()
         encode_end = time.time()
