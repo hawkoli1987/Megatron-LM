@@ -413,47 +413,7 @@ def main():
     process_json_end = time.time()
     print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Process json took {process_json_end - process_json_start:.2f} seconds")
 
-    if args.partitions == 1:
-        print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Only one partition, exiting from here")
-        return
-
-    # merge bin/idx partitions
-    level = "document"
-    if args.split_sentences:
-        level = "sentence"
-
-    output_bin_files = {}
-    output_idx_files = {}
-    builders = {}
-    tokenizer_start = time.time()
-    tokenizer = build_tokenizer(args)
-    tokenizer_end = time.time()
-    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Building tokenizer took {tokenizer_end - tokenizer_start:.2f} seconds")
-
-    merge_start = time.time()
-    # the final file is output_prefix-key specific
-    for key in args.json_keys:
-        output_bin_files[key] = "{}_{}_{}.bin".format(args.output_prefix,
-                                                      key, level)
-        output_idx_files[key] = "{}_{}_{}.idx".format(args.output_prefix,
-                                                      key, level)
-        # initialize a builder for each key
-        builders[key] = indexed_dataset.IndexedDatasetBuilder(
-            output_bin_files[key],
-            dtype=indexed_dataset.DType.optimal_dtype(tokenizer.vocab_size),
-        )
-
-        # add all output rows from all partitions to the builder
-        for name in in_ss_out_names:
-            parition_output_prefix = name['output_prefix']
-            full_partition_output_prefix = "{}_{}_{}".format(parition_output_prefix,
-                                                             key, level)
-            builders[key].add_index(full_partition_output_prefix)
-        # close all output file handlers, write out the accumulated data to disk
-        builders[key].finalize(output_idx_files[key])
-    merge_end = time.time()
-    print(f"{time.strftime('%H:%M:%S', time.localtime())} Process - Merging partitions took {merge_end - merge_start:.2f} seconds")
-
+    return
 
 if __name__ == '__main__':
 
