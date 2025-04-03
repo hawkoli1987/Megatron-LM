@@ -1,7 +1,6 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Processing large data for pretraining."""
-import argparse
 import math
 import json
 import os
@@ -16,13 +15,6 @@ import glob
 import torch
 import numpy as np
 import multiprocessing
-
-# Force 'spawn' method for all multiprocessing
-try:
-    multiprocessing.set_start_method('spawn')
-    print(f"{time.strftime('%H:%M:%S', time.localtime())} Process - Using 'spawn' multiprocessing start method")
-except RuntimeError:
-    print(f"{time.strftime('%H:%M:%S', time.localtime())} Process - Multiprocessing start method already set to: {multiprocessing.get_start_method()}")
 
 import functools
 try:
@@ -173,15 +165,26 @@ class Partition(object):
         print("Opening", input_file_name)
         
         file_open_start = time.time()
-        n_workers = f"local[{self.args.workers}]" if hasattr(self.args, 'workers') and self.args.workers > 0 else "local[*]"
         
+        if hasattr(self.args, 'workers') and self.args.workers > 0:
+            n_workers = f"local[{self.args.workers}]"
+        else:
+            n_workers = f"local[{multiprocessing.cpu_count() - 5}]"
+        
+        # Calculate partition size in MB (max of executor memory / n_workers or 256MB)
+        executor_memory_mb = 1000 * 1024  # Convert 1000g to MB
+        partition_size_mb = max(executor_memory_mb // self.args.workers, 256)
+        
+        print(f"n_workers: {n_workers}")
+        print(f"Partition size: {partition_size_mb}m")
+
+
         # Create a SparkSession (or get the existing one).
         spark = SparkSession.builder \
             .master(n_workers) \
-            .config("spark.driver.memory", "200g") \
-            .config("spark.executor.memory", "200g") \
-            .config("spark.executorEnv.PYTHONPATH", "/shared/all/nemo_workspace/Megatron_yuli/:$PYTHONPATH") \
-            .config("spark.driverEnv.PYTHONPATH", "/shared/all/nemo_workspace/Megatron_yuli/:$PYTHONPATH") \
+            .config("spark.driver.memory", "1000g") \
+            .config("spark.executor.memory", "1000g") \
+            .config("spark.sql.files.maxPartitionBytes", f"{partition_size_mb}m") \
             .getOrCreate()
         sc = spark.sparkContext
         
@@ -243,6 +246,7 @@ class Partition(object):
         # ---------------------------
         
         # Now, for each JSON key, merge all partition outputs.
+        merge_start_time = time.time()
         for key in self.args.json_keys:
             # Final output names.
             output_full_prefix = "{}_{}_{}".format(output_prefix, key, level)
@@ -263,10 +267,17 @@ class Partition(object):
                 # Extract the base name without extension
                 partition_name = os.path.splitext(partition)[0]
                 builder.add_index(partition_name)
+                # Remove the partition file after it's been added to the builder
+                try:
+                    os.remove(partition)  # Remove .idx file
+                    os.remove(partition_name + '.bin')  # Remove corresponding .bin file
+                    print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Removed partition files: {partition} and {partition_name}.bin")
+                except OSError as e:
+                    print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Error removing partition files: {e}")
             # Finalize the final builder to merge all indices and write the idx file.
             builder.finalize(output_idx_file)
         
-        print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Merging partitions completed.")
+        print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Merging partitions completed in {time.time() - merge_start_time:.2f} seconds")
         
         # ---------------------------
         # Phase 3: Clean up intermediate files
@@ -403,6 +414,7 @@ def main():
     print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Process json took {process_json_end - process_json_start:.2f} seconds")
 
     if args.partitions == 1:
+        print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Only one partition, exiting from here")
         return
 
     # merge bin/idx partitions
