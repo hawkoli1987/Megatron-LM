@@ -1,6 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 """Processing large data for pretraining."""
+import argparse
 import math
 import json
 import os
@@ -267,13 +268,6 @@ class Partition(object):
                 # Extract the base name without extension
                 partition_name = os.path.splitext(partition)[0]
                 builder.add_index(partition_name)
-                # Remove the partition file after it's been added to the builder
-                try:
-                    os.remove(partition)  # Remove .idx file
-                    os.remove(partition_name + '.bin')  # Remove corresponding .bin file
-                    print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Removed partition files: {partition} and {partition_name}.bin")
-                except OSError as e:
-                    print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Error removing partition files: {e}")
             # Finalize the final builder to merge all indices and write the idx file.
             builder.finalize(output_idx_file)
         
