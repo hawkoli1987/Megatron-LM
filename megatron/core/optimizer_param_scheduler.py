@@ -43,16 +43,16 @@ class OptimizerParamScheduler:
         max_lr: float,
         min_lr: float,
         lr_warmup_steps: int,
-        lr_decay_steps: int,
-        lr_decay_style: str,
+        lr_decay_steps: int, # should be MAX_STEPS, but if it's less than, the remaining steps will stay constant at min_lr
+        lr_decay_style: str, # different scheduler style: WSD, constant, linear, cosine, inverse-square-root
         start_wd: float,
         end_wd: float,
         wd_incr_steps: int,
         wd_incr_style: str,
         use_checkpoint_opt_param_scheduler: Optional[bool] = True,
         override_opt_param_scheduler: Optional[bool] = False,
-        wsd_decay_steps: Optional[int] = None,
-        lr_wsd_decay_style: Optional[str] = None,
+        wsd_decay_steps: Optional[int] = None, # the num steps for the decay phase of WSD
+        lr_wsd_decay_style: Optional[str] = None, # different WSD decay styles: linear, cosine, exponential, minus_sqrt
     ) -> None:
 
         # Class values.
@@ -158,14 +158,19 @@ class OptimizerParamScheduler:
         delta_lr = max_lr - min_lr
 
         coeff = None
+        # direct linear decay after warmup
         if self.lr_decay_style == 'linear':
             coeff = 1.0 - decay_ratio
+        # direct cosine decay after warmup
         elif self.lr_decay_style == 'cosine':
             coeff = 0.5 * (math.cos(math.pi * decay_ratio) + 1.0)
+        # WSD constant + decay phase
         elif self.lr_decay_style == 'WSD':
             wsd_anneal_start_ = self.lr_decay_steps - self.wsd_decay_steps
+            # constant phase of WSD
             if self.num_steps <= wsd_anneal_start_:
                 coeff = 1.0
+            # decay phase of WSD, where self.num_steps > wsd_anneal_start_
             else:
                 wsd_steps = self.num_steps - wsd_anneal_start_
                 wsd_decay_ratio = float(wsd_steps) / float(self.wsd_decay_steps)
