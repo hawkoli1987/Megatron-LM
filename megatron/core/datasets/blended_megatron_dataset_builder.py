@@ -223,10 +223,11 @@ class BlendedMegatronDatasetBuilder(object):
             return blended_datasets
 
         ##
-        # Each split comes from a separate distribution
+        # Each split comes from a separate distribution (distribution = data_path)
         ##
         else:
             blended_datasets = [None] * len(Split)
+            # iterate over train, val, test
             for i in range(len(Split)):
                 split_spoof = [None] * len(Split)
                 split_spoof[i] = (0.0, 1.0)
@@ -236,6 +237,7 @@ class BlendedMegatronDatasetBuilder(object):
                 # Blend is provided for the split
                 blend = self.config.blend_per_split[i]
                 if blend is not None:
+                    # each is a list of prefixes and weights
                     prefixes, weights = blend
                     if weights is not None:
                         weights = normalize(weights)
@@ -246,6 +248,8 @@ class BlendedMegatronDatasetBuilder(object):
                             prefixes[0], split_spoof, sizes_spoof
                         )[i]
                         continue
+                    
+                    # multiple validation sets, each give individual validation loss
                     elif self.config.multiple_validation_sets and i == Split.valid.value:
                         # handle multiple validation sets
                         validation_datasets = []
@@ -262,6 +266,8 @@ class BlendedMegatronDatasetBuilder(object):
                         continue
 
                     # Build mid-level datasets
+                    # if weight provided, build one dataset blending different data_paths 
+                    # with natural proportions
                     if weights is None:
                         sizes_per_dataset_buffer = [
                             [None for split in Split] for prefix in prefixes
@@ -282,6 +288,8 @@ class BlendedMegatronDatasetBuilder(object):
                     )[i]
 
                     # Build top-level dataset
+                    # if weight provided, build one dataset blending different data_paths 
+                    # with weighted proportions
                     if weights is not None and self.sizes[i] is not None:
                         # Blend according to client-specified weights and client-specified size
                         size_per_dataset = list(zip(*sizes_per_dataset_target))[i]
