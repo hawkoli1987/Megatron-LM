@@ -5,12 +5,14 @@ import os
 import sys
 import tempfile
 import time
-
+from pathlib import Path
 import nltk
+import pandas as pd
 import pytest
 import requests
 
 from megatron.core.datasets.indexed_dataset import IndexedDataset
+from megatron.core.datasets.group_input_jsonl import input_jsonl_group_by_size
 from megatron.training.tokenizer.gpt2_tokenization import (
     PRETRAINED_MERGES_ARCHIVE_MAP,
     PRETRAINED_VOCAB_ARCHIVE_MAP,
@@ -53,7 +55,7 @@ def dummy_jsonl(odir):
 
 NUM_SAMPLES = 1000
 SEQ_LEN = 8192
-print(f"NUM_SAMPLES: {NUM_SAMPLES}")
+# print(f"NUM_SAMPLES: {NUM_SAMPLES}")
 print(f"SEQ_LEN: {SEQ_LEN}")
 
 def dummy_long_jsonl(odir):
@@ -75,18 +77,124 @@ def dummy_long_jsonl(odir):
     with open(os.path.join(odir, "sequences.jsonl"), "w") as writer:
         writer.writelines(list_sequences)
 
+def dummy_parquet(odir):
+    """
+    Creates a parquet file with NUM_SAMPLES rows, each row containing a sequence of '1' characters
+    with length SEQ_LEN. Target size: ~100GB.
+    
+    Args:
+        odir: Output directory where the parquet file will be saved
+    """
+    # Create a sequence of '1' characters with length SEQ_LEN
+    sequence = '1' * SEQ_LEN
+    
+    samples_per_file = max(1, 1073741824 // SEQ_LEN)  # 1GB / SEQ_LEN
 
+    # Generate NUM_SAMPLES rows, each containing the sequence
+    data = [{"text": sequence} for _ in range(samples_per_file)]
+    
+    # Create DataFrame and save as parquet
+    df = pd.DataFrame(data)
+    parquet_path = os.path.join(odir, "sequences.parquet")
+    df.to_parquet(parquet_path, index=False)
+    
+    # Print size of parquet file
+    parquet_size = os.path.getsize(parquet_path)
+    parquet_size_gb = parquet_size / (1024**3)
+    print(f"Parquet file size: {parquet_size:,} bytes ({parquet_size_gb:.2f} GB)", flush=True)
+
+def dummy_jsonl_list(odir):
+    """
+    Creates 100 jsonl files (0.jsonl to 99.jsonl), each approximately 1GB in size.
+    Each file contains sequences of '1' characters.
+    
+    Args:
+        odir: Output directory where the jsonl files will be saved
+    """
+    # Calculate samples per file to achieve ~1GB per file
+    # Assuming each character is 1 byte, and we want 1GB = 1,073,741,824 bytes
+    # With SEQ_LEN characters per sample, we need: 1,073,741,824 / SEQ_LEN samples per file
+    samples_per_file = max(1, 10737418 // SEQ_LEN)  # 0.01GB / SEQ_LEN
+    
+    # Create 100 files (0.jsonl to 99.jsonl)
+    for i in range(100):
+        filename = f"{i}.jsonl"
+        filepath = os.path.join(odir, filename)
+        
+        # Create a sequence of '1' characters with length SEQ_LEN
+        sequence = '1' * SEQ_LEN
+        
+        # Generate samples_per_file rows for this file
+        list_sequences = [json.dumps({"text": sequence}) + "\n" for _ in range(samples_per_file)]
+        
+        # Write the rows to the jsonl file
+        with open(filepath, "w") as writer:
+            writer.writelines(list_sequences)
+        
+        print(f"Created {filepath} with size {os.path.getsize(filepath) / 1024 / 1024 / 1024:.2f} GB", flush=True)
+
+    # Calculate and print total size of all JSONL files
+    total_size_bytes = 0
+    jsonl_files = [f for f in os.listdir(odir) if f.endswith('.jsonl')]
+    for filename in jsonl_files:
+        filepath = os.path.join(odir, filename)
+        total_size_bytes += os.path.getsize(filepath)
+    
+    total_size_gb = total_size_bytes / (1024**3)
+    print(f"Total size of {len(jsonl_files)} JSONL files: {total_size_bytes:,} bytes ({total_size_gb:.2f} GB)", flush=True)
+    print("creation of jsonl_list completed", flush=True)
+
+def dummy_EN_DCLM_Edu(odir):
+    """
+    Creates a jsonl file with EN_DCLM_Edu data.
+    """
+    input_dir = "/gojek/data/EN/EN_DCLM-Edu"
+    # Replace odir with a symlink pointing to input_dir, and confirm odir exists
+
+    import shutil
+    shutil.rmtree(odir)
+    os.symlink(input_dir, odir)
+    assert os.path.exists(odir), f"Symlink {odir} was not created"
 
 def build_datasets(idir, odir, extra_args=[]):
-    for name in os.listdir(idir):
-        sys.argv = [
-            sys.argv[0],
-            "--input",
-            os.path.join(idir, name),
-            "--output-prefix",
-            os.path.join(odir, os.path.splitext(name)[0]),
-        ] + extra_args
+    input_files = [str(f) for f in Path(idir).glob(f"*")]
+    # Sort by numeric filename if possible, otherwise alphanumeric
+    def sort_key(x):
+        stem = Path(x).stem
+        if stem.isdigit():
+            return (0, int(stem))  # Numeric files first, sorted numerically
+        else:
+            return (1, stem)  # Alphanumeric files second, sorted alphabetically
+    
+    input_files = sorted(input_files, key=sort_key)
+    print(f"input_files before grouping: {input_files}") # always the fullpath
+    if len(input_files) > 1:
+        input_files = input_jsonl_group_by_size(input_files, target_size_gb=0.1, mean_threshold_gb=0.05)
+    print(f"input_files after grouping: {input_files}") # always the fullpath
+    for name in input_files:
+        print("-"*100, flush=True)
+        print(f"building dataset for: {name}")
+        if isinstance(name, list):
+            flatten_name = " ".join(name) # concat the list of input filepaths into a single string for input
+            representative_name = name[0] # collapse the list of filepaths into a single filepath for output
+            sys.argv = [
+                sys.argv[0],
+                "--input",
+                flatten_name,
+                "--output-prefix",
+                os.path.join(odir, os.path.splitext(os.path.basename(representative_name))[0]), # no extension
+            ] + extra_args
+        else:
+            sys.argv = [
+                sys.argv[0],
+                "--input",
+                name,
+                "--output-prefix",
+                os.path.join(odir, os.path.splitext(os.path.basename(name))[0]),
+            ] + extra_args
+        print(f"build dataset sys.argv: {sys.argv}")
         build_main()
+        print("-"*100, flush=True)
 
 
 def merge_datasets(idir):
@@ -95,6 +203,7 @@ def merge_datasets(idir):
     If only one pair exists, creates a duplicate pair named 'merge'.
     """
     sys.argv = [sys.argv[0], "--input", idir, "--output-prefix", os.path.join(idir, "merge")]
+    print(f"sys.argv: {sys.argv}")
     merge_main()
 
 
@@ -105,15 +214,7 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
 
     path_to_raws = os.path.join(temp_dir, "sample_raws")
     path_to_data = os.path.join(temp_dir, "sample_data")
-    os.mkdir(path_to_raws)
     os.mkdir(path_to_data)
-
-    # create the dummy resources
-    start_time = time.time()
-    dummy_jsonl(path_to_raws)
-    dummy_long_jsonl(path_to_raws)
-    create_time = time.time() - start_time
-    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset creation completed in {create_time:.2f} seconds")
 
     # build the datasets
     start_time = time.time()
@@ -126,6 +227,19 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
     merge_datasets(path_to_data)
     merge_time = time.time() - start_time
     print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset merging completed in {merge_time:.2f} seconds")
+
+    # Print size of merged dataset
+    merge_bin_path = os.path.join(path_to_data, "merge.bin")
+    print(f"predicted merge_bin_path: {merge_bin_path}")
+    print("Files under path_to_data:")
+    for fname in sorted(os.listdir(path_to_data)):
+        print("  -", fname)
+    
+    if os.path.exists(merge_bin_path):
+        merge_bin_size = os.path.getsize(merge_bin_path)
+        print(f"  - merge.bin: {merge_bin_size / (1024**3):.2f} GB")
+    else:
+        print("Warning: Merged dataset files not found!")
 
     sys.argv = [sys.argv[0], "--input", None, "--output-prefix", None] + extra_args
     encoder = Encoder(build_args())
@@ -155,6 +269,12 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
     merged_doc_index_index = 0
 
     for basename in basenames:
+        # skip checking for parquet files and large file numbers given their large size
+        if basename.endswith(".parquet"):
+            return
+        if len(basename) > 10:
+            return
+
         print(f"path_to_raws: {path_to_raws}")
         print(f"basename: {basename}")
         realpath_raw = f"{os.path.join(path_to_raws, '_'.join(basename.split('_')[:-2]))}.jsonl"
@@ -227,7 +347,7 @@ def gpt2_merge(odir):
     return path
 
 
-def test_preprocess_data_gpt():
+def test_preprocess_data_gpt(dummy_input_type: str):
     # Set default environment variables if not already set
     if 'WORLD_SIZE' not in os.environ:
         os.environ['WORLD_SIZE'] = '1'
@@ -248,11 +368,21 @@ def test_preprocess_data_gpt():
             "--merge-file",
             gpt2_merge(temp_dir),
             "--append-eod",
-            "--workers",
-            "10",
+            # "--workers",
+            # "10",
             "--log-interval",
             "1", 
         ]
+        print(f"temp_dir: {temp_dir}")
+
+        path_to_raws = os.path.join(temp_dir, "sample_raws")
+        os.mkdir(path_to_raws)
+
+        # Create dummy data using dynamic function naming
+        start_time = time.time()
+        globals()[f"dummy_{dummy_input_type}"](path_to_raws)
+        create_time = time.time() - start_time
+        print(f"{time.strftime('%H:%M:%S', time.localtime())}  Test - Dataset creation completed in {create_time:.2f} seconds")
 
         do_test_preprocess_data(temp_dir, extra_args=gpt_args)
     
@@ -268,31 +398,10 @@ def bert_vocab(odir):
         writer.write(requests.get(__HUGGINGFACE_BERT_BASE_UNCASED_VOCAB).content)
     return path
 
-
-# @pytest.mark.flaky
-# @pytest.mark.flaky_in_dev
-# def test_preprocess_data_bert():
-#     with tempfile.TemporaryDirectory() as temp_dir:
-
-#         # bert specific args
-#         bert_args = [
-#             "--tokenizer-type",
-#             "BertWordPieceLowerCase",
-#             "--vocab-file",
-#             bert_vocab(temp_dir),
-#             "--split-sentences",
-#             "--workers",
-#             "10",
-#             "--log-interval",
-#             "1",
-#             "--partitions",
-#             "2",
-#             "--keep-sequential-samples",
-#         ]
-
-#         do_test_preprocess_data(temp_dir, extra_args=bert_args)
-
-
 if __name__ == "__main__":
-    test_preprocess_data_gpt()
+    # test_preprocess_data_gpt(dummy_input_type="jsonl")
+    # test_preprocess_data_gpt(dummy_input_type="long_jsonl")
+    # test_preprocess_data_gpt(dummy_input_type="parquet")
+    test_preprocess_data_gpt(dummy_input_type="jsonl_list")
+    # test_preprocess_data_gpt(dummy_input_type="EN_DCLM_Edu")
     # test_preprocess_data_bert()
