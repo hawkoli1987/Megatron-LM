@@ -1,20 +1,19 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+import logging
+
+# Option 1: Set higher log level for the specific logger
+logging.getLogger('megatron.core.datasets.indexed_dataset').setLevel(logging.WARNING)
 
 """Processing large data for pretraining."""
 import argparse
-import math
 import json
 import os
 import sys
-import glob
 from pyspark.sql import SparkSession
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),
                                              os.path.pardir)))
 import time
-import gzip
 import glob
-import torch
-import numpy as np
 import multiprocessing
 
 import functools
@@ -160,38 +159,56 @@ class Partition(object):
         fin.close()
         fout.close()
 
-    def process_json_file(self, file_name):
+    def process_input_file(self, file_name):
         # Unpack input file name and output prefix.
         input_file_name, output_prefix = file_name
         print("Opening", input_file_name)
         
         file_open_start = time.time()
         
-        if hasattr(self.args, 'workers') and self.args.workers > 0:
-            n_workers = f"local[{self.args.workers}]"
+        if hasattr(self.args, 'workers') and self.args.workers is not None:
+            print(f"Using {self.args.workers} workers")
+            n_workers = self.args.workers
+        # default if not set
         else:
-            n_workers = f"local[{multiprocessing.cpu_count() - 5}]"
+            print("Using default number of workers")
+            n_workers = multiprocessing.cpu_count() - 5
         
         # Calculate partition size in MB (max of executor memory / n_workers or 256MB)
-        executor_memory_mb = 1000 * 1024  # Convert 1000g to MB
-        partition_size_mb = max(executor_memory_mb // self.args.workers, 256)
+        executor_memory_gb = 32
+        per_worker_RAM_mb = min(executor_memory_gb * 1024 // n_workers, 256)
         
         print(f"n_workers: {n_workers}")
-        print(f"Partition size: {partition_size_mb}m")
-
+        print(f"pyspark RAM per worker: {per_worker_RAM_mb}m")
 
         # Create a SparkSession (or get the existing one).
         spark = SparkSession.builder \
-            .master(n_workers) \
-            .config("spark.driver.memory", "1000g") \
-            .config("spark.executor.memory", "1000g") \
-            .config("spark.sql.files.maxPartitionBytes", f"{partition_size_mb}m") \
+            .master(f"local[{n_workers}]") \
+            .config("spark.driver.memory", f"{executor_memory_gb}g") \
+            .config("spark.executor.memory", f"{executor_memory_gb}g") \
+            .config("spark.sql.files.maxPartitionBytes", f"{per_worker_RAM_mb}m") \
             .getOrCreate()
         sc = spark.sparkContext
         
-        # Read the input file and repartition it to the desired number of partitions.
-        # This ensures the output is split into exactly args.partitions parts.
-        rdd = sc.textFile(input_file_name)
+        # Handle 3 cases for input file processing and convert all to DataFrame RDD:
+        # 1. if input_file_name is a single parquet file, read it as parquet file, then convert to RDD of Row objects
+        # 2. if input_file_name is a single jsonl file, read it in, and convert it to pyspark dataframe, then convert to RDD of Row objects
+        # 3. if input_file_name is a list of jsonl files, load them into a single pyspark dataframe, then convert to RDD of Row objects
+        
+        # Handle 3 cases for input file processing:
+        if input_file_name[0].endswith('.parquet'):
+            # Case 1: Single parquet file
+            print(f"Loading parquet file: {input_file_name}")
+            assert len(input_file_name) == 1, "Expected a single parquet file"
+            df = spark.read.parquet(input_file_name[0])
+            rdd = df.rdd
+        elif input_file_name[0].endswith('.jsonl') or input_file_name[0].endswith('.json'):
+            # Case 2&3: JSON files (single or list)
+            print(f"Loading {len(input_file_name)} jsonl files into DataFrame")
+            df = spark.read.option("multiline", "false").json(input_file_name)
+            rdd = df.rdd
+        else:
+            raise ValueError(f"Unsupported input file type: {input_file_name}. Expected: .jsonl, .json, .parquet files, or a list of jsonl files.")
         
         file_open_end = time.time()
         print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Opening file took {file_open_end - file_open_start:.2f} seconds")
@@ -206,8 +223,9 @@ class Partition(object):
         if self.args.split_sentences:
             level = "sentence"
         
-        # Define a function to process a partition and write out its results
+        # Process a partition and write out its results
         # in the same bin/idx format using the IndexedDatasetBuilder.
+        # Now only handles PySpark DataFrame input (Row objects).
         def process_and_write_partition(index, iterator):
             # Each partition gets its own Encoder instance.
             local_encoder = Encoder(self.args)
@@ -223,9 +241,13 @@ class Partition(object):
                     dtype=indexed_dataset.DType.optimal_dtype(build_tokenizer(self.args).vocab_size)
                 )
             
-            # Process each line in the partition.
-            for line in iterator:
-                doc, sentence_lens, bytes_processed = local_encoder.encode(line)
+            # Process each Row object in the partition.
+            for row in iterator:
+                # Convert PySpark Row object to JSON string for processing
+                row_dict = row.asDict()
+                json_line = json.dumps(row_dict)
+                
+                doc, sentence_lens, bytes_processed = local_encoder.encode(json_line)
                 for key in doc.keys():
                     local_builders[key].add_document(doc[key], sentence_lens[key])
             
@@ -252,6 +274,7 @@ class Partition(object):
             # Final output names.
             output_full_prefix = "{}_{}_{}".format(output_prefix, key, level)
             output_bin_file = "{}.bin".format(output_full_prefix)
+            print(f"output_bin_file: {output_bin_file}")
             output_idx_file = "{}.idx".format(output_full_prefix)
             # Initialize the final builder.
             builder = indexed_dataset.IndexedDatasetBuilder(
@@ -263,7 +286,7 @@ class Partition(object):
                 glob.glob(f"{output_prefix}_{key}_{level}_*.idx"),
                 key=lambda x: int(x.split('_')[-1].split('.')[0])  # Sort by numeric partition index
             )
-            print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Found {len(partitions)} partitions")
+            print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Found {len(partitions)} shards of {output_full_prefix}")
             for partition in partitions:
                 # Extract the base name without extension
                 partition_name = os.path.splitext(partition)[0]
@@ -271,7 +294,7 @@ class Partition(object):
             # Finalize the final builder to merge all indices and write the idx file.
             builder.finalize(output_idx_file)
         
-        print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Merging partitions completed in {time.time() - merge_start_time:.2f} seconds")
+        print(f"{time.strftime('%H:%M:%S', time.localtime())} IN - Merging shards completed in {time.time() - merge_start_time:.2f} seconds")
         
         # ---------------------------
         # Phase 3: Clean up intermediate files
@@ -297,7 +320,7 @@ def get_args():
     parser = _add_tokenizer_args(parser)
     group = parser.add_argument_group(title='input data')
     group.add_argument('--input', type=str, required=True,
-                       help='Path to input JSON')
+                       help='Path to input JSON, or a flattened list of paths')
     group.add_argument('--json-keys', nargs='+', default=['text'],
                        help='space separate listed of keys to extract from json')
     group.add_argument('--split-sentences', action='store_true',
@@ -313,7 +336,7 @@ def get_args():
     group.add_argument('--output-prefix', type=str, required=True,
                        help='Path to binary output file without suffix')
     group = parser.add_argument_group(title='runtime')
-    group.add_argument('--workers', type=int, required=True,
+    group.add_argument('--workers', type=int, default=None, required=False,
                        help=('Number of worker processes to launch.'
                              'A good default for fast pre-processing '
                              'is: (workers * partitions) = available CPU cores.'))
@@ -338,20 +361,6 @@ def get_args():
 
     return args
 
-
-def get_file_name(args, file_id):
-    """Constructs file names for input, sentence split, and output files based on file_id."""
-    file_name, extension = os.path.splitext(args.input)
-    input_file_name = file_name + "_" + str(file_id) + extension
-    sentence_split_file = file_name + "_ss_" + str(file_id) + extension
-    output_prefix = args.output_prefix + "_" + str(file_id)
-    file_names = {
-        'partition': input_file_name,
-        'sentence_split': sentence_split_file,
-        'output_prefix': output_prefix}
-    return file_names
-
-
 @timing_decorator
 def check_files_exist(in_ss_out_names, key, num_partitions):
     """Checks if all partition files for a given output directory and key exist."""
@@ -364,6 +373,7 @@ def check_files_exist(in_ss_out_names, key, num_partitions):
 def main():
     args = get_args()
 
+    # TODO: remove sentence split support in future
     if args.split_sentences:
         if nltk_available:
             nltk.download("punkt", quiet=True, download_dir=os.environ.get("NLTK_DATA"))
@@ -374,26 +384,31 @@ def main():
     in_ss_out_names = []
 
     print(f"{time.strftime('%H:%M:%S', time.localtime())}  Sentence splitting is {'enabled' if args.split_sentences else 'disabled'}")
-    print(f"{time.strftime('%H:%M:%S', time.localtime())}  Number of partitions: {args.partitions}")
 
-    file_name, extension = os.path.splitext(args.input)
-    sentence_split_file = file_name + "_ss" + extension
-    file_names = {
-        'partition': args.input,
+    args.input = args.input.split()
+    
+    # TODO: remove sentence split support in future
+    # get a single filename
+    representative_file_name, extension = os.path.splitext(args.input[0])
+    sentence_split_file = representative_file_name + "_ss" + extension
+    in_ss_out_name = {
+        'partition': args.input, # can be a flattened list of jsonl filepath, or single jsonl/parquet filepath
         'sentence_split': sentence_split_file,
-        'output_prefix': args.output_prefix}
-    in_ss_out_names.append(file_names)
+        'output_prefix': args.output_prefix # a single representativeoutput prefix even the input is a list
+        }
+    in_ss_out_names.append(in_ss_out_name)
 
     partition = Partition(args, args.workers)
 
+    # TODO: remove sentence split support in future
     # check to see if paritions with split sentences already created
     split_sentences_present = check_files_exist(in_ss_out_names, 'sentence_split', args.partitions)
 
-    # TODO: to resolve and test by fixing the error in splitter = nltk.load(url)
+    # TODO: remove sentence split support in future
     # split sentences in partition files
     if args.split_sentences and not split_sentences_present:
-        for name in in_ss_out_names:
-            partition.split_sentences((name['partition'], name['sentence_split']))
+        for in_ss_out_name in in_ss_out_names:
+            partition.split_sentences((in_ss_out_name['partition'], in_ss_out_name['sentence_split']))
         return
 
     # encode partition files in parallel
@@ -401,8 +416,8 @@ def main():
     
     process_json_start = time.time()
     # it applies to both single and multiple partitions
-    for name in in_ss_out_names:
-        partition.process_json_file((name[input_key], name['output_prefix']))
+    for in_ss_out_name in in_ss_out_names:
+        partition.process_input_file((in_ss_out_name[input_key], in_ss_out_name['output_prefix']))
 
     process_json_end = time.time()
     print(f"{time.strftime('%H:%M:%S', time.localtime())}  Process - Process json took {process_json_end - process_json_start:.2f} seconds")
