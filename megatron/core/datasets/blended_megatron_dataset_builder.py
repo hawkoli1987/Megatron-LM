@@ -155,6 +155,7 @@ class BlendedMegatronDatasetBuilder(object):
 
         ##
         # All splits come from the same distribution
+        # HYL: use the same blend configurtion for all splits
         ##
         elif self.config.blend:
             prefixes, weights = self.config.blend
@@ -224,6 +225,7 @@ class BlendedMegatronDatasetBuilder(object):
 
         ##
         # Each split comes from a separate distribution (distribution = data_path)
+        # HYL: each split uses a separate blend configuration
         ##
         else:
             blended_datasets = [None] * len(Split)
