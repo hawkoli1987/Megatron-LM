@@ -49,6 +49,12 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
        output tokens are both of the desired sequence length
     """
 
+    swap_eos_token: bool = False
+    """Option to swap EOS token ID 151645 with 151643 during data loading for performance optimization.
+       When enabled, token swapping happens at numpy level in _query_document_sample_shuffle_indices()
+       instead of torch level in __getitem__(), providing significant performance improvement.
+    """
+
     object_storage_cache_path: Optional[str] = None
     """Path for caching indices for s3 or msc dataloading."""
 
@@ -109,6 +115,10 @@ class GPTDataset(MegatronDataset):
             self._pad_token_id = self.config.tokenizer.pad
         except Exception:
             self._pad_token_id = _PAD_TOKEN_ID
+
+        # Configure tokenizer for EOS token swapping if enabled
+        if hasattr(self.config.tokenizer, '_swap_eos_token'):
+            self.config.tokenizer._swap_eos_token = self.config.swap_eos_token
 
         (self.document_index, self.sample_index, self.shuffle_index) = (
             self._build_document_sample_shuffle_indices()
@@ -177,6 +187,7 @@ class GPTDataset(MegatronDataset):
             text, _ = self._query_document_sample_shuffle_indices(idx)
 
         text = torch.from_numpy(text).long()
+        
         if self.config.add_extra_token_to_sequence:
             tokens = text[:-1].contiguous()
             labels = text[1:].contiguous()
@@ -300,8 +311,15 @@ class GPTDataset(MegatronDataset):
                 * (self.config.sequence_length + self.config.add_extra_token_to_sequence - length)
             )
 
+        # Concatenate sample parts into final text array
+        text = numpy.concatenate(sample_parts, dtype=numpy.int64)
+        
+        # Perform EOS token swapping at numpy level for performance optimization
+        if self.config.swap_eos_token:
+            text = numpy.where(text == 151645, 151643, text)
+        
         return (
-            numpy.concatenate(sample_parts, dtype=numpy.int64),
+            text,
             numpy.array(document_ids, dtype=numpy.int64),
         )
 
