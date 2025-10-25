@@ -766,3 +766,17 @@ class GPTModel(LanguageModule):
                 )
 
         return sharded_state_dict
+
+    # MTP: Add custom freeze function to freeze base model layers
+    def freeze(self, freeze_base_model: bool):
+        """
+        Freezes the base model layers by setting their requires_grad attribute to False.
+        """
+        if not freeze_base_model:
+            return
+
+        print("Start freezing base model parameters.")
+        for name, param in self.named_parameters():
+            if 'mtp.' not in name:
+                param.requires_grad = False
+        print("Completed freezing base model.")
