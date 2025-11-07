@@ -79,21 +79,30 @@ def get_param_id_to_sharded_param_map(
 
 
 def make_sharded_optimizer_tensor(
-    model_param: Union[ShardedTensor, ShardedTensorFactory], optim_param: torch.Tensor, prefix: str
+        model_param: Union[ShardedTensor, ShardedTensorFactory], optim_param: torch.Tensor, prefix: str, layer_wise_optimizer: bool = False
 ) -> Union[ShardedTensor, ShardedTensorFactory]:
     """Build a ShardedTensor or ShardedTensorFactory for optimizer param based on model param
+    NK modification: Add layer-wise optimizer argument and corresponding logic.
 
     Args:
         model_param (Union[ShardedTensor, ShardedTensorFactory]): model param
         optim_param (torch.Tensor): corresponding optimizer param
         prefix (str): optimizer prefix for the ShardedTensor or ShardedTensorFactory
+        layer_wise_optimizer (bool): whether the LayerWiseDistributedOptimizer is used
 
     Returns:
         Union[ShardedTensor, ShardedTensorFactory]: wrapped optimizer parameter
     """
     optim_param = to_local_if_dtensor(optim_param)
     if isinstance(model_param, ShardedTensorFactory):
-        return replace(model_param, key=f'{prefix}.{model_param.key}', data=optim_param)
+        sh_ten_fac = replace(model_param, key=f'{prefix}.{model_param.key}', data=optim_param)
+        if layer_wise_optimizer:
+            replica_id = sh_ten_fac.replica_id
+            if isinstance(replica_id, int):
+                sh_ten_fac.replica_id = 0
+            elif isinstance(replica_id, tuple):
+                sh_ten_fac.replica_id = tuple(0 for _ in range(len(replica_id)))
+        return sh_ten_fac
 
     assert tuple(optim_param.shape) == model_param.local_shape, (
         f'Optimizer shape ({tuple(optim_param.shape)} does not match model shape '
@@ -103,6 +112,15 @@ def make_sharded_optimizer_tensor(
         model_param, key=f'{prefix}.{model_param.key}', data=optim_param, dtype=optim_param.dtype
     )
     sh_ten.validate_metadata_integrity()
+    if sh_ten.key == 'optimizer.state.momentum_buffer.decoder.layers.mlp.linear_fc1.weight':
+        print(f"NK_DEBUG: sh_ten.key = {sh_ten.key}")
+        print(f"NK_DEBUG: sh_ten.replica_id = {sh_ten.replica_id}")
+    if layer_wise_optimizer:
+        replica_id = sh_ten.replica_id
+        if isinstance(replica_id, int):
+            sh_ten.replica_id = 0
+        elif isinstance(replica_id, tuple):
+            sh_ten.replica_id = tuple(0 for _ in range(len(replica_id)))
     return sh_ten
 
 
@@ -110,6 +128,8 @@ def optim_state_to_sharding_state(
     optim_state_dict: StateDict,
     id_to_sharded_param_map: Dict[int, ShardedTensor],
     exclude_keys: Tuple[str] = (),
+    #NK modification: Add layer-wise optimizer argument
+    layer_wise_optimizer: bool = False,
 ):
     """Turn optimizer state dict to sharded state dict based on model state dict *in-place*.
 
@@ -136,8 +156,9 @@ def optim_state_to_sharding_state(
             if state_key in exclude_keys:
                 continue
             if param_id in id_to_sharded_param_map:
+                # NK modification: Add layer-wise optimizer argument
                 sharded_state[param_id][state_key] = make_sharded_optimizer_tensor(
-                    id_to_sharded_param_map[param_id], param, prefix=f'optimizer.state.{state_key}'
+                    id_to_sharded_param_map[param_id], param, prefix=f'optimizer.state.{state_key}', layer_wise_optimizer=layer_wise_optimizer
                 )
             else:
                 raise ValueError(f'Param id {param_id} does not match any model sharded param')

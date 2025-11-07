@@ -639,9 +639,14 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         config: OptimizerConfig,
         grad_scaler: MegatronGradScaler,
         init_state_fn: Callable,
+        # NK modification: Add layer-wise optimizer argument
+        layer_wise_optimizer: bool = False,
     ):
 
         super().__init__(optimizer, config, grad_scaler, init_state_fn)
+
+        # NK modification: Add layer-wise optimizer argument
+        self.layer_wise_optimizer = layer_wise_optimizer
 
         # Handle main parameters.
 
@@ -800,7 +805,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         metadata: Optional[dict] = None,
     ):
 
-        if is_loading:
+        if is_loading and self.init_state_fn is not None:
             self.init_state_fn(self.optimizer, self.config)
 
         state_dict = self.state_dict()
@@ -819,6 +824,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                     id_to_sharded_param_map[param_id],
                     fp32_param,
                     prefix=f'optimizer.state.fp32_param',
+                    layer_wise_optimizer = self.layer_wise_optimizer
                 )
                 for param_id, fp32_param in zip(state_group['params'], fp32_group)
             ]
@@ -834,7 +840,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         # expected to have the same shape as the model parameters,
         # so we save the step separately and ignore it here
         optim_state_to_sharding_state(
-            state_dict['optimizer'], id_to_sharded_param_map, exclude_keys="step"
+            state_dict['optimizer'], id_to_sharded_param_map, exclude_keys="step", layer_wise_optimizer = self.layer_wise_optimizer
         )
         # save step as a shared step among all parameters. Separate per-parameter
         # steps are not supported
@@ -893,7 +899,9 @@ class FP32Optimizer(MegatronOptimizer):
     """
 
     def __init__(
-        self, optimizer: torch.optim.Optimizer, config: OptimizerConfig, init_state_fn: Callable
+        self, optimizer: torch.optim.Optimizer, config: OptimizerConfig, init_state_fn: Callable,
+        # NK modification: Add layer-wise optimizer argument
+        layer_wise_optimizer: bool = False,
     ):
         if has_config_logger_enabled(config):
             log_config_to_disk(config, locals(), prefix=type(self).__name__)
@@ -902,6 +910,7 @@ class FP32Optimizer(MegatronOptimizer):
 
         self._scale = torch.tensor([1.0], dtype=torch.float, device='cuda')
         self.is_stub_optimizer = True if optimizer is None else False
+        self.layer_wise_optimizer = layer_wise_optimizer
 
     def zero_grad(self, set_to_none=True):
         """Copied from torch.optim.optimizer"""
@@ -1023,7 +1032,7 @@ class FP32Optimizer(MegatronOptimizer):
         # all optimizer parameters passed to optim_state_to_sharding_state are
         # expected to have the same shape as the model parameters,
         # so we save the step separately and ignore it here
-        optim_state_to_sharding_state(state_dict, id_to_sharded_param_map, exclude_keys="step")
+        optim_state_to_sharding_state(state_dict, id_to_sharded_param_map, exclude_keys="step", layer_wise_optimizer = self.layer_wise_optimizer)
         # save step as a shared step among all parameters. Separate per-parameter
         # steps are not supported
         if step:

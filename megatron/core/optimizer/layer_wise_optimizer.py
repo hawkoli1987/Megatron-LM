@@ -1,6 +1,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 import torch
 
@@ -36,6 +36,7 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
         optimizers: List[MegatronOptimizer],
         config: OptimizerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        init_state_fn_list: Optional[List[Callable]] = None,
     ) -> None:
         self.pg_collection = pg_collection
         self.shard_params(optimizers)
@@ -45,8 +46,9 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
         if config.bf16:
             if isinstance(optimizers[0], Float16OptimizerWithFloat16Params):
                 raise TypeError('LayerWiseDistributedOptimizer received Float16 optimizer already.')
+            #NK modification: Add last argument and set it to True
             optimizers = [
-                Float16OptimizerWithFloat16Params(optim, config, None, None) for optim in optimizers
+                Float16OptimizerWithFloat16Params(optim, config, None, init_state_fn_list[idx], True) for idx, optim in enumerate(optimizers)
             ]
         super().__init__(optimizers)
 
@@ -67,7 +69,8 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
         # look like: [[p0, p4, p8], [p1, p5, p9], [p2, p6], [p3, p7]]
 
         # simplify when dp_cp group size is 1
-        if get_pg_size(self.pg_collection.dp_cp) == 1:
+        dp_cp_size = get_pg_size(self.pg_collection.dp_cp)
+        if dp_cp_size == 1:
             self.dp_cp_params_list = None
             self.expt_dp_params_list = None
             return

@@ -159,6 +159,7 @@ class TensorParallelMuon(OrthogonalizedOptimizer):
         return grad
 
 
+
 def get_megatron_muon_optimizer(
     config: OptimizerConfig,
     model_chunks: List[MegatronModule],
@@ -255,6 +256,9 @@ def get_megatron_muon_optimizer(
         mode=config.muon_tp_mode,
     )
 
+    # optimizer = torch.optim.AdamW(linear_param_groups, lr = config.lr, betas = (config.adam_beta1, config.adam_beta2), eps = config.adam_eps, weight_decay = config.weight_decay)
+    # optimizer = torch.optim.SGD(linear_param_groups, lr = config.lr, momentum = config.muon_momentum, weight_decay = config.weight_decay)
+
     # set config here to:
     # 1. get adam for rest of layer
     # 2. avoid ChainedOptimizer check fail that assert all optimizers are same kind
@@ -262,6 +266,25 @@ def get_megatron_muon_optimizer(
     # TODO(deyuf): allow user to select optimizer mix and relax ChainedOptimizer design
     config.optimizer = 'adam'
 
+    # Needed for torch_dist ckpt_format, unlike torch ckpt_format
+    # For other emerging optimizers, need to implement init_state_fn as well
+    # TODO(boxiangw): Improve usability after optimizer refactor
+    # TODO(boxiangw): support precision aware optimizer
+    def muon_init_state_fn(opt, config=None):
+        for group in opt.param_groups:
+            for p in group['params']:
+                if len(opt.state[p]) == 0:
+                    opt.state[p]['momentum_buffer'] = torch.zeros_like(p.data)
+
+    def adam_init_state_fn(opt, config=None):
+        for group in opt.param_groups:
+            for p in group['params']:
+                if len(opt.state[p]) == 0:
+                    if config is None or not config.use_precision_aware_optimizer:
+                        opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
+                        opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
+                    else:
+                        opt.initialize_state(p)
     # need to wrap into megatron mix precision optimizer. (only support bf16 w/o loss scale now)
     if config.fp16:
         raise Exception('muon with fp16 is not supported.')
@@ -275,9 +298,9 @@ def get_megatron_muon_optimizer(
             reset_config_bf16 = True
         else:
             # if not using layer_wise wrapper, just create master weight here is fine
-            optimizer = Float16OptimizerWithFloat16Params(optimizer, config, None, None)
+            optimizer = Float16OptimizerWithFloat16Params(optimizer, config, None, muon_init_state_fn)
     else:
-        optimizer = FP32Optimizer(optimizer, config, None)
+        optimizer = FP32Optimizer(optimizer, config, muon_init_state_fn)
 
     optimizers.append(optimizer)
 
@@ -289,7 +312,7 @@ def get_megatron_muon_optimizer(
 
     # call original get. linear params will be skipped since they're freezed
     chained_adam = get_megatron_optimizer(
-        config, model_chunks, no_weight_decay_cond, scale_lr_cond, lr_mult, use_gloo_process_groups
+        config, model_chunks, no_weight_decay_cond, scale_lr_cond, lr_mult, use_gloo_process_groups 
     )
 
     # unfreeze everything
@@ -303,5 +326,5 @@ def get_megatron_muon_optimizer(
         log_single_rank(logger, logging.INFO, 'Using LayerWiseDistributedOptimizer for Muon')
         if reset_config_bf16:
             config.bf16 = True
-        return LayerWiseDistributedOptimizer(optimizers, config, pg_collection)
+        return LayerWiseDistributedOptimizer(optimizers, config, pg_collection, init_state_fn_list=[muon_init_state_fn, adam_init_state_fn])
     return ChainedOptimizer(optimizers)
