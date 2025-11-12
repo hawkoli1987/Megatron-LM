@@ -1626,6 +1626,28 @@ class MLATransformerConfig(TransformerConfig):
        This is only for the dynamic inference backend and requires that 
        Flash MLA is installed."""
 
+    dsa_training_mode: str = "disabled"
+    """Training mode for DeepSeek Sparse Attention. Supported values:
+       'disabled', 'warmup', and 'sparse'."""
+
+    dsa_index_n_heads: int = 64
+    """Number of indexer heads used by DSA."""
+
+    dsa_index_head_dim: int = 128
+    """Head dimension for the DSA indexer."""
+
+    dsa_index_topk: int = 2048
+    """Number of top tokens selected per query in sparse mode."""
+
+    dsa_kl_loss_weight: float = 1.0
+    """Weight applied to the DSA KL loss."""
+
+    dsa_detach_indexer_inputs: bool = True
+    """Whether to detach inputs feeding the DSA indexer (matches DeepSeek warm-up protocol)."""
+
+    dsa_log_aux_metrics: bool = False
+    """If enabled, logs DSA auxiliary losses through the MoE logging utility."""
+
     def __post_init__(self):
         super().__post_init__()
         if self.multi_latent_attention and self.apply_rope_fusion and self.rope_type != "yarn":
@@ -1635,3 +1657,16 @@ class MLATransformerConfig(TransformerConfig):
             assert (
                 self.apply_rope_fusion is False
             ), "Rope Fusion is not compatible with caching latents"
+
+        if self.dsa_training_mode not in {"disabled", "warmup", "sparse"}:
+            raise ValueError(
+                f"Unsupported dsa_training_mode '{self.dsa_training_mode}'. "
+                "Choose from 'disabled', 'warmup', or 'sparse'."
+            )
+        if self.dsa_training_mode != "disabled":
+            if not self.multi_latent_attention:
+                raise ValueError("DSA requires multi_latent_attention to be enabled.")
+            if self.dsa_index_topk <= 0:
+                raise ValueError("dsa_index_topk must be positive when DSA is enabled.")
+            if self.dsa_index_head_dim & (self.dsa_index_head_dim - 1) != 0:
+                raise ValueError("dsa_index_head_dim must be a power of two for DSA.")
