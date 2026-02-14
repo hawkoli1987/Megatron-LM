@@ -37,6 +37,7 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 from megatron.core.utils import deprecate_inference_params, is_te_min_version
+from megatron.core.transformer.deepseek_sparse_attention import DeepSeekSparseIndexer
 
 try:
     from megatron.core.fusions.fused_mla_yarn_rope_apply import (
@@ -193,6 +194,13 @@ class MultiLatentAttention(Attention):
             # the quantized tensor.
             set_save_original_input(self.linear_proj)
 
+        self.dsa_indexer = (
+            DeepSeekSparseIndexer(self.config, self.layer_number)
+            if self.config.dsa_training_mode != "disabled"
+            else None
+        )
+        self.dsa_last_kl_loss = None
+
     def forward(
         self,
         hidden_states,
@@ -261,6 +269,58 @@ class MultiLatentAttention(Attention):
         # Value is none during decode for absorption
         if value is not None:
             value = value.contiguous()
+
+        def _mask_to_bss(mask: torch.Tensor, batch: int) -> torch.Tensor:
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(0)
+            if mask.dim() == 4:
+                mask = mask.squeeze(1)
+            if mask.dim() == 3 and mask.size(0) == 1 and batch > 1:
+                mask = mask.expand(batch, -1, -1)
+            return mask
+
+        def _ensure_4d(mask: torch.Tensor, batch: int) -> torch.Tensor:
+            if mask.dim() == 2:
+                mask = mask.unsqueeze(0).unsqueeze(0)
+            elif mask.dim() == 3:
+                if mask.size(0) == 1 and batch > 1:
+                    mask = mask.expand(batch, -1, -1)
+                mask = mask.unsqueeze(1)
+            elif mask.dim() == 4 and mask.size(0) == 1 and batch > 1:
+                mask = mask.expand(batch, -1, -1, -1)
+            return mask
+
+        if (
+            self.dsa_indexer is not None
+            and inference_context is None
+            and packed_seq_params is None
+            and attention_mask is not None
+        ):
+            batch = hidden_states.size(1)
+            dsa_hidden = hidden_states.permute(1, 0, 2).contiguous()
+            if self.config.q_lora_rank is not None:
+                qr_states = q_compressed.permute(1, 0, 2).contiguous()
+            else:
+                qr_states = dsa_hidden
+            causal_mask = _mask_to_bss(attention_mask, batch)
+            dsa_output = self.dsa_indexer(
+                dsa_hidden,
+                qr_states,
+                freqs_cis=None,
+                causal_mask=causal_mask,
+                query=query,
+                key=key,
+                attn_scale=self.softmax_scale,
+                training=self.training,
+            )
+            if dsa_output is not None:
+                self.dsa_last_kl_loss = dsa_output.kl_loss
+                if dsa_output.additive_mask is not None:
+                    dsa_mask = dsa_output.additive_mask.unsqueeze(1)
+                    attention_mask = _ensure_4d(attention_mask, batch)
+                    attention_mask = attention_mask + dsa_mask
+                else:
+                    attention_mask = _ensure_4d(attention_mask, batch)
 
         # ==================================
         # core attention computation

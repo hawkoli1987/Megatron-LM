@@ -393,6 +393,10 @@ def core_config_from_args(args, dataclass=TransformerConfig):
     for f in dataclasses.fields(dataclass):
         if hasattr(args, f.name):
             kw_args[f.name] = getattr(args, f.name)
+        elif f.default is not dataclasses.MISSING:
+            kw_args[f.name] = f.default
+        elif getattr(f, "default_factory", dataclasses.MISSING) is not dataclasses.MISSING:
+            kw_args[f.name] = f.default_factory()
         else:
             raise Exception(f"Missing argument {f.name} for {str(dataclass)} config")
     return kw_args
